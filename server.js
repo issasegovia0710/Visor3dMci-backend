@@ -4,6 +4,7 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
+const XLSX = require("xlsx"); // Para generar el Excel en memoria
 
 /* ============================
    Helpers
@@ -14,7 +15,7 @@ function slugify(str) {
     (str || "proyecto")
       .toString()
       .normalize("NFD")
-      .replace(/[̀-\u036f]/g, "")
+      .replace(/[\u0300-\u036f]/g, "")
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "")
@@ -42,7 +43,7 @@ app.use(express.json());
 
 const publicDir = path.join(__dirname, "public");
 
-// servir archivos estáticos de los modelos
+// servir archivos estáticos
 app.use("/public", express.static(publicDir));
 
 // carpeta temporal para subidas
@@ -108,6 +109,36 @@ function writeScene(folder, sceneDoc) {
 }
 
 /* ============================
+   Helper: armar workbook de Excel en memoria
+   (SIN columna de links)
+============================ */
+
+function buildQuoteWorkbook(quoteDoc) {
+  const rows = (quoteDoc.items || []).map((it) => ({
+    Concepto: it.concepto,
+    Cantidad: it.cantidad,
+    Precio: it.precio,
+    Importe: it.cantidad * it.precio,
+  }));
+
+  rows.push({});
+  rows.push({
+    Concepto: "TOTAL",
+    Cantidad: "",
+    Precio: "",
+    Importe: quoteDoc.total,
+  });
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.json_to_sheet(rows, {
+    header: ["Concepto", "Cantidad", "Precio", "Importe"],
+  });
+
+  XLSX.utils.book_append_sheet(wb, ws, "Cotización");
+  return wb;
+}
+
+/* ============================
    POST /api/projects
    Crea carpeta + modelo + scene.json
 ============================ */
@@ -128,13 +159,11 @@ app.post("/api/projects", upload.single("model"), (req, res) => {
     const projectDir = path.join(publicDir, folderSlug);
     fs.mkdirSync(projectDir, { recursive: true });
 
-    // modelo.ext
     const originalExt = path.extname(req.file.originalname) || "";
     const modelFileName = "modelo" + originalExt;
     const finalModelPath = path.join(projectDir, modelFileName);
     fs.renameSync(req.file.path, finalModelPath);
 
-    // posición / rotación
     let positionObj = { x: 0, y: 0, z: 0 };
     let rotationObj = { x: 0, y: 0, z: 0 };
 
@@ -232,7 +261,6 @@ app.get("/api/projects/:id", (req, res) => {
 
 /* ============================
    PUT /api/projects/:id/transform
-   Actualiza posición y rotación
 ============================ */
 
 app.put("/api/projects/:id/transform", (req, res) => {
@@ -245,7 +273,6 @@ app.put("/api/projects/:id/transform", (req, res) => {
         .json({ ok: false, error: "Proyecto no encontrado." });
     }
 
-    // si viene contraseña la validamos
     if (req.body.password) {
       const hash = hashPassword(req.body.password);
       if (hash !== scene.passwordHash) {
@@ -277,7 +304,6 @@ app.put("/api/projects/:id/transform", (req, res) => {
 
 /* ============================
    PUT /api/projects/:id/model
-   Reemplaza el modelo
 ============================ */
 
 app.put("/api/projects/:id/model", upload.single("model"), (req, res) => {
@@ -298,7 +324,6 @@ app.put("/api/projects/:id/model", upload.single("model"), (req, res) => {
 
     const dir = path.join(publicDir, folder);
 
-    // borrar modelo anterior si existe
     if (scene.modelFile) {
       const oldPath = path.join(dir, scene.modelFile);
       if (fs.existsSync(oldPath)) {
@@ -331,7 +356,6 @@ app.put("/api/projects/:id/model", upload.single("model"), (req, res) => {
 
 /* ============================
    PUT /api/projects/:id/rename
-   Cambia solo el nombre del proyecto
 ============================ */
 
 app.put("/api/projects/:id/rename", (req, res) => {
@@ -374,7 +398,6 @@ app.put("/api/projects/:id/rename", (req, res) => {
 
 /* ============================
    PUT /api/projects/:id/notes
-   Guarda notas generales del proyecto
 ============================ */
 
 app.put("/api/projects/:id/notes", (req, res) => {
@@ -418,7 +441,6 @@ app.put("/api/projects/:id/notes", (req, res) => {
 
 /* ============================
    PUT /api/projects/:id/parts-meta
-   Guarda nombre, notas, color y material de una pieza
 ============================ */
 
 app.put("/api/projects/:id/parts-meta", (req, res) => {
@@ -480,7 +502,6 @@ app.put("/api/projects/:id/parts-meta", (req, res) => {
 
 /* ============================
    DELETE /api/projects/:id
-   Borra carpeta si contraseña coincide
 ============================ */
 
 app.delete("/api/projects/:id", (req, res) => {
@@ -513,6 +534,153 @@ app.delete("/api/projects/:id", (req, res) => {
     return res.json({ ok: true, message: "Proyecto eliminado." });
   } catch (err) {
     console.error("Error en DELETE /api/projects/:id:", err);
+    return res.status(500).json({ ok: false, error: "Error interno." });
+  }
+});
+
+/* ============================
+   COTIZACIONES
+   /api/quotes/:id
+============================ */
+
+/* GET /api/quotes/:id  -> lee cotizacion.json */
+app.get("/api/quotes/:id", (req, res) => {
+  try {
+    const folder = req.params.id;
+    const dir = path.join(publicDir, folder);
+    const quotePath = path.join(dir, "cotizacion.json");
+
+    if (!fs.existsSync(quotePath)) {
+      return res.status(404).json({
+        ok: false,
+        error: "No hay cotización guardada para este proyecto.",
+      });
+    }
+
+    const raw = fs.readFileSync(quotePath, "utf8");
+    const quoteDoc = JSON.parse(raw);
+
+    return res.json({
+      ok: true,
+      quote: quoteDoc,
+    });
+  } catch (err) {
+    console.error("Error en GET /api/quotes/:id:", err);
+    return res.status(500).json({ ok: false, error: "Error interno." });
+  }
+});
+
+/* PUT /api/quotes/:id
+   Guarda cotizacion.json
+   (EL EXCEL NO SE GUARDA, SOLO SE GENERA AL DESCARGAR)
+*/
+app.put("/api/quotes/:id", (req, res) => {
+  try {
+    const folder = req.params.id;
+    const scene = readScene(folder);
+    if (!scene) {
+      return res
+        .status(404)
+        .json({ ok: false, error: "Proyecto no encontrado." });
+    }
+
+    const { password, items, total } = req.body || {};
+
+    if (!password || !Array.isArray(items)) {
+      return res.status(400).json({
+        ok: false,
+        error: "password e items (array) son obligatorios.",
+      });
+    }
+
+    const hash = hashPassword(password);
+    if (hash !== scene.passwordHash) {
+      return res
+        .status(403)
+        .json({ ok: false, error: "Contraseña incorrecta." });
+    }
+
+    const normalizedItems = items.map((it) => ({
+      concepto: (it.concepto || "").toString(),
+      cantidad: Number(it.cantidad) || 0,
+      precio: Number(it.precio) || 0,
+      link: (it.link || "").toString(),
+    }));
+
+    let computedTotal = normalizedItems.reduce(
+      (acc, it) => acc + it.cantidad * it.precio,
+      0
+    );
+    if (!isFinite(computedTotal)) computedTotal = 0;
+
+    const quoteDoc = {
+      projectId: folder,
+      projectName: scene.name,
+      date: new Date().toISOString(),
+      items: normalizedItems,
+      total: typeof total === "number" ? total : computedTotal,
+    };
+
+    const dir = path.join(publicDir, folder);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    const quotePath = path.join(dir, "cotizacion.json");
+    fs.writeFileSync(quotePath, JSON.stringify(quoteDoc, null, 2), "utf8");
+
+    return res.json({
+      ok: true,
+      message: "Cotización guardada.",
+      quote: quoteDoc,
+    });
+  } catch (err) {
+    console.error("Error en PUT /api/quotes/:id:", err);
+    return res.status(500).json({ ok: false, error: "Error interno." });
+  }
+});
+
+/* GET /api/quotes/:id/excel
+   Genera el Excel EN MEMORIA y lo descarga
+   (NO se guarda cotizacion.xlsx en disco)
+*/
+app.get("/api/quotes/:id/excel", (req, res) => {
+  try {
+    const folder = req.params.id;
+    const quotePath = path.join(publicDir, folder, "cotizacion.json");
+
+    if (!fs.existsSync(quotePath)) {
+      return res.status(404).json({
+        ok: false,
+        error:
+          "No hay cotización guardada. Primero guarda la cotización para poder descargar el Excel.",
+      });
+    }
+
+    const raw = fs.readFileSync(quotePath, "utf8");
+    const quoteDoc = JSON.parse(raw);
+
+    const wb = buildQuoteWorkbook(quoteDoc);
+
+    const buffer = XLSX.write(wb, {
+      bookType: "xlsx",
+      type: "buffer",
+    });
+
+    const fileName = `cotizacion-${folder}.xlsx`;
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${fileName}"`
+    );
+
+    return res.send(buffer);
+  } catch (err) {
+    console.error("Error en GET /api/quotes/:id/excel:", err);
     return res.status(500).json({ ok: false, error: "Error interno." });
   }
 });
