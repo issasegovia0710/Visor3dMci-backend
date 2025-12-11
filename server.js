@@ -7,6 +7,49 @@ const crypto = require("crypto");
 const XLSX = require("xlsx"); // Para generar el Excel en memoria
 
 /* ============================
+   Firebase Admin (backend)
+============================ */
+const admin = require("firebase-admin");
+
+let db = null;
+let bucket = null;
+
+try {
+  const projectId = process.env.FIREBASE_PROJECT_ID || "visor3dmci";
+  const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+  let privateKey = process.env.FIREBASE_PRIVATE_KEY;
+
+  if (clientEmail && privateKey) {
+    // Si viene con \n escapados, los restauramos
+    privateKey = privateKey.replace(/\\n/g, "\n");
+
+    if (!admin.apps.length) {
+      admin.initializeApp({
+        credential: admin.credential.cert({
+          projectId,
+          clientEmail,
+          privateKey,
+        }),
+        storageBucket:
+          process.env.FIREBASE_STORAGE_BUCKET ||
+          "visor3dmci.firebasestorage.app",
+      });
+    }
+
+    db = admin.firestore();
+    bucket = admin.storage().bucket();
+
+    console.log("✅ Firebase Admin inicializado correctamente.");
+  } else {
+    console.warn(
+      "⚠️ Variables FIREBASE_CLIENT_EMAIL o FIREBASE_PRIVATE_KEY no definidas. Firebase no se inicializará."
+    );
+  }
+} catch (err) {
+  console.error("❌ Error inicializando Firebase Admin:", err);
+}
+
+/* ============================
    Helpers
 ============================ */
 
@@ -91,7 +134,9 @@ function readScene(folder) {
     rotation: sceneDoc.rotation || { x: 0, y: 0, z: 0 },
     passwordHash: sceneDoc.passwordHash || "",
     modelFile: sceneDoc.modelFile || null,
-    modelUrl: sceneDoc.modelFile ? `/public/${folder}/${sceneDoc.modelFile}` : null,
+    modelUrl: sceneDoc.modelFile
+      ? `/public/${folder}/${sceneDoc.modelFile}`
+      : null,
     pendingNotes: sceneDoc.pendingNotes || "",
     partsMeta: sceneDoc.partsMeta || {},
     _raw: sceneDoc,
@@ -145,7 +190,8 @@ function buildQuoteWorkbook(quoteDoc) {
 
 app.post("/api/projects", upload.single("model"), (req, res) => {
   try {
-    const { projectName, author, date, password, position, rotation } = req.body;
+    const { projectName, author, date, password, position, rotation } =
+      req.body;
 
     if (!projectName || !password || !req.file) {
       return res.status(400).json({
@@ -389,7 +435,11 @@ app.put("/api/projects/:id/rename", (req, res) => {
 
     const updated = readScene(folder);
     const { _raw, passwordHash, ...view } = updated;
-    return res.json({ ok: true, project: view, message: "Proyecto renombrado." });
+    return res.json({
+      ok: true,
+      project: view,
+      message: "Proyecto renombrado.",
+    });
   } catch (err) {
     console.error("Error en PUT /api/projects/:id/rename:", err);
     return res.status(500).json({ ok: false, error: "Error interno." });
@@ -454,7 +504,8 @@ app.put("/api/projects/:id/parts-meta", (req, res) => {
         .json({ ok: false, error: "Proyecto no encontrado." });
     }
 
-    const { partId, name, notes, color, materialPreset, password } = req.body || {};
+    const { partId, name, notes, color, materialPreset, password } =
+      req.body || {};
     if (partId === undefined || !password) {
       return res.status(400).json({
         ok: false,
@@ -482,7 +533,9 @@ app.put("/api/projects/:id/parts-meta", (req, res) => {
       notes: notes !== undefined ? notes : oldMeta.notes || "",
       color: color !== undefined ? color : oldMeta.color || "#22c55e",
       materialPreset:
-        materialPreset !== undefined ? materialPreset : oldMeta.materialPreset || "plastic",
+        materialPreset !== undefined
+          ? materialPreset
+          : oldMeta.materialPreset || "plastic",
     };
 
     writeScene(folder, sceneDoc);
@@ -682,6 +735,39 @@ app.get("/api/quotes/:id/excel", (req, res) => {
   } catch (err) {
     console.error("Error en GET /api/quotes/:id/excel:", err);
     return res.status(500).json({ ok: false, error: "Error interno." });
+  }
+});
+
+/* ============================
+   TEST: Firebase
+============================ */
+
+app.get("/api/fb-test", async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(500).json({
+        ok: false,
+        error:
+          "Firebase no está inicializado. Revisa las variables FIREBASE_* en el servidor.",
+      });
+    }
+
+    const now = new Date().toISOString();
+
+    await db.collection("tests").doc("visor3dmci-test").set({
+      message: "Hola desde backend Node",
+      at: now,
+    });
+
+    const snap = await db.collection("tests").doc("visor3dmci-test").get();
+
+    return res.json({
+      ok: true,
+      fromFirestore: snap.exists ? snap.data() : null,
+    });
+  } catch (err) {
+    console.error("Error en /api/fb-test:", err);
+    return res.status(500).json({ ok: false, error: "Firebase no respondió." });
   }
 });
 
