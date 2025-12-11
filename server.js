@@ -1,3 +1,4 @@
+// server.js
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
@@ -54,7 +55,6 @@ function hashPassword(password) {
 function projectRowToView(row) {
   if (!row) return null;
 
-  // URL pública del modelo, si hay ruta
   let modelUrl = null;
   if (row.model_path) {
     const { data } = supabase.storage
@@ -129,14 +129,13 @@ const allowedOrigins = rawOrigins
 app.use(
   cors({
     origin: function (origin, callback) {
-      // Para peticiones tipo Postman, curl o mismo servidor (sin origin)
+      // Peticiones tipo Postman / curl / misma máquina (sin origin)
       if (!origin) {
         return callback(null, true);
       }
 
-      // Si no configuraste nada, por seguridad se puede bloquear todo
-      // o permitir todos. Aquí dejamos: si no hay lista, se permite todo.
       if (allowedOrigins.length === 0) {
+        // Si no hay lista configurada, permitir todo
         return callback(null, true);
       }
 
@@ -171,6 +170,22 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 /* ============================
+   Helpers DB
+============================ */
+
+async function getProjectById(id) {
+  const { data, error } = await supabase
+    .from("projects")
+    .select("*")
+    .eq("id", id)
+    .single();
+  if (error) {
+    return { error };
+  }
+  return { data };
+}
+
+/* ============================
    Rutas de proyectos
 ============================ */
 
@@ -198,12 +213,12 @@ app.post("/api/projects", upload.single("model"), async (req, res) => {
     let rotationObj = { x: 0, y: 0, z: 0 };
     try {
       if (position) positionObj = JSON.parse(position);
-    } catch (e) {
+    } catch {
       console.warn("position no es JSON válido, se usa por defecto.");
     }
     try {
       if (rotation) rotationObj = JSON.parse(rotation);
-    } catch (e) {
+    } catch {
       console.warn("rotation no es JSON válido, se usa por defecto.");
     }
 
@@ -301,21 +316,6 @@ app.get("/api/projects", async (req, res) => {
 });
 
 /**
- * Helper: obtener proyecto por id
- */
-async function getProjectById(id) {
-  const { data, error } = await supabase
-    .from("projects")
-    .select("*")
-    .eq("id", id)
-    .single();
-  if (error) {
-    return { error };
-  }
-  return { data };
-}
-
-/**
  * GET /api/projects/:id
  */
 app.get("/api/projects/:id", async (req, res) => {
@@ -398,7 +398,8 @@ app.put("/api/projects/:id/transform", async (req, res) => {
 
 /**
  * PUT /api/projects/:id/model
- * Reemplaza el modelo 3D en Supabase Storage.
+ * Reemplaza el modelo 3D en Supabase Storage con NOMBRE ÚNICO
+ * para evitar problemas de caché.
  */
 app.put("/api/projects/:id/model", upload.single("model"), async (req, res) => {
   try {
@@ -423,17 +424,19 @@ app.put("/api/projects/:id/model", upload.single("model"), async (req, res) => {
       return res.status(500).json({ ok: false, error: "Error interno." });
     }
 
-    // Borrar modelo anterior si existe
+    // 1) Borrar modelo anterior si existe
     if (project.model_path) {
       await supabase.storage
         .from(SUPABASE_MODELS_BUCKET)
         .remove([project.model_path]);
     }
 
-    // Subir nuevo modelo
+    // 2) Subir nuevo modelo con nombre único para romper caché
     const ext = path.extname(req.file.originalname) || "";
-    const modelFileName = "modelo" + ext;
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e6);
+    const modelFileName = `modelo-${uniqueSuffix}${ext}`;
     const objectPath = `${id}/${modelFileName}`;
+
     const fileBuffer = fs.readFileSync(req.file.path);
     const contentType =
       req.file.mimetype || mime.getType(ext) || "application/octet-stream";
@@ -454,6 +457,7 @@ app.put("/api/projects/:id/model", upload.single("model"), async (req, res) => {
         .json({ ok: false, error: "Error al subir el modelo." });
     }
 
+    // 3) Guardar nueva ruta y nombre en la tabla projects
     const { data: updated, error: updateError } = await supabase
       .from("projects")
       .update({
